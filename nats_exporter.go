@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/log"
 )
 
@@ -47,17 +48,13 @@ type Exporter struct {
 	mutex             sync.RWMutex
 	client            *http.Client
 
-	totalScrapes, jsonParseFailures prometheus.Counter
-	up                              prometheus.Gauge
-
-	startTime, mem, connections, routes, remotes, slowConsumers prometheus.Gauge
-	totalConnections, inMsgs, outMsgs, inBytes, outBytes        prometheus.Counter
-
-	httpRequests *prometheus.CounterVec
-
-	numSubscriptions, numCache         prometheus.Gauge
-	numInserts, numRemoves, numMatches prometheus.Counter
-	cacheHitRate, maxFanout, avgFanout prometheus.Gauge
+	totalScrapes, jsonParseFailures                                  prometheus.Counter
+	up                                                               prometheus.Gauge
+	startTime, cpu, mem, connections, routes, remotes, slowConsumers prometheus.Gauge
+	totalConnections, inMsgs, outMsgs, inBytes, outBytes             prometheus.Gauge
+	httpRequests                                                     *prometheus.GaugeVec
+	numSubscriptions, numCache, numInserts, numRemoves, numMatches   prometheus.Gauge
+	cacheHitRate, maxFanout, avgFanout                               prometheus.Gauge
 }
 
 // NewExporter returns an initialized Exporter.
@@ -69,12 +66,12 @@ func NewExporter(baseURI string, timeout time.Duration) *Exporter {
 		up: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "up",
-			Help:      "Was the last scrape of gnatsd successful.",
+			Help:      "Was the last scrape of Nats Server successful.",
 		}),
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "exporter_total_scrapes",
-			Help:      "Current total gnatsd scrapes.",
+			Help:      "Current total Nats Server scrapes.",
 		}),
 		jsonParseFailures: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
@@ -85,17 +82,27 @@ func NewExporter(baseURI string, timeout time.Duration) *Exporter {
 		startTime: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "server_start",
-			Help:      "Timestamp of gnatsd startup.",
+			Help:      "Timestamp of Nats Server startup.",
 		}),
 		mem: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "mem",
 			Help:      "mem",
 		}),
+		cpu: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "cpu",
+			Help:      "cpu",
+		}),
 		connections: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "connections",
 			Help:      "connections",
+		}),
+		totalConnections: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "connections_total",
+			Help:      "connections_total",
 		}),
 		routes: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
@@ -107,39 +114,32 @@ func NewExporter(baseURI string, timeout time.Duration) *Exporter {
 			Name:      "remotes",
 			Help:      "remotes",
 		}),
+		inMsgs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "msgs_in",
+			Help:      "msgs_in",
+		}),
+		outMsgs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "msgs_out",
+			Help:      "msgs_out",
+		}),
+		inBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "bytes_in",
+			Help:      "bytes_in",
+		}),
+		outBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "bytes_out",
+			Help:      "bytes_out",
+		}),
 		slowConsumers: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "slow_consumers",
 			Help:      "slow_consumers",
 		}),
-
-		totalConnections: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "connections_total",
-			Help:      "connections_total",
-		}),
-		inMsgs: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "msgs_in",
-			Help:      "msgs_in",
-		}),
-		outMsgs: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "msgs_out",
-			Help:      "msgs_out",
-		}),
-		inBytes: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "bytes_in",
-			Help:      "bytes_in",
-		}),
-		outBytes: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "bytes_out",
-			Help:      "bytes_in",
-		}),
-
-		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+		httpRequests: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "http_requests",
 			Help:      "http_requests",
@@ -147,44 +147,50 @@ func NewExporter(baseURI string, timeout time.Duration) *Exporter {
 
 		numSubscriptions: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscriptions_total",
+			Subsystem: "subscriptions",
+			Name:      "total",
 			Help:      "subscriptions_total",
 		}),
 		numCache: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscriptions_cache",
+			Subsystem: "subscriptions",
+			Name:      "cache",
 			Help:      "subscriptions_cache",
 		}),
-
-		numInserts: prometheus.NewCounter(prometheus.CounterOpts{
+		numInserts: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscription_inserts",
+			Subsystem: "subscriptions",
+			Name:      "inserts",
 			Help:      "subscription_inserts",
 		}),
-		numRemoves: prometheus.NewCounter(prometheus.CounterOpts{
+		numRemoves: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscription_removes",
+			Subsystem: "subscriptions",
+			Name:      "removes",
 			Help:      "subscription_removes",
 		}),
-		numMatches: prometheus.NewCounter(prometheus.CounterOpts{
+		numMatches: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscription_matches",
+			Subsystem: "subscriptions",
+			Name:      "matches",
 			Help:      "subscription_matches",
 		}),
-
 		cacheHitRate: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscription_cache_hit_rate",
+			Subsystem: "subscriptions",
+			Name:      "cache_hit_rate",
 			Help:      "subscription_cache_hit_rate",
 		}),
 		maxFanout: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscription_fanout_max",
+			Subsystem: "subscriptions",
+			Name:      "fanout_max",
 			Help:      "subscription_fanout_max",
 		}),
 		avgFanout: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Name:      "subscription_fanout_avg",
+			Subsystem: "subscriptions",
+			Name:      "fanout_avg",
 			Help:      "subscription_fanout_avg",
 		}),
 
@@ -211,18 +217,21 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- e.up.Desc()
 	ch <- e.totalScrapes.Desc()
 	ch <- e.jsonParseFailures.Desc()
+
 	ch <- e.startTime.Desc()
 	ch <- e.mem.Desc()
+	ch <- e.cpu.Desc()
 	ch <- e.connections.Desc()
+	ch <- e.totalConnections.Desc()
 	ch <- e.routes.Desc()
 	ch <- e.remotes.Desc()
-	ch <- e.slowConsumers.Desc()
-	ch <- e.totalConnections.Desc()
 	ch <- e.inMsgs.Desc()
 	ch <- e.outMsgs.Desc()
 	ch <- e.inBytes.Desc()
 	ch <- e.outBytes.Desc()
+	ch <- e.slowConsumers.Desc()
 	e.httpRequests.Describe(ch)
+
 	ch <- e.numSubscriptions.Desc()
 	ch <- e.numCache.Desc()
 	ch <- e.numInserts.Desc()
@@ -245,18 +254,21 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ch <- e.up
 	ch <- e.totalScrapes
 	ch <- e.jsonParseFailures
+
 	ch <- e.startTime
 	ch <- e.mem
+	ch <- e.cpu
 	ch <- e.connections
+	ch <- e.totalConnections
 	ch <- e.routes
 	ch <- e.remotes
-	ch <- e.slowConsumers
-	ch <- e.totalConnections
 	ch <- e.inMsgs
 	ch <- e.outMsgs
 	ch <- e.inBytes
 	ch <- e.outBytes
+	ch <- e.slowConsumers
 	e.httpRequests.Collect(ch)
+
 	ch <- e.numSubscriptions
 	ch <- e.numCache
 	ch <- e.numInserts
@@ -275,7 +287,7 @@ func (e *Exporter) scrape() {
 	err = e.fetch(e.VarzURI, &varz)
 	if err != nil {
 		e.up.Set(0)
-		log.Errorf("Can't scrape gnatsd varz: %v", err)
+		log.Errorf("Can't scrape varz: %s", err)
 		return
 	}
 
@@ -283,33 +295,35 @@ func (e *Exporter) scrape() {
 	err = e.fetch(e.SubszURI, &subsz)
 	if err != nil {
 		e.up.Set(0)
-		log.Errorf("Can't scrape gnatsd subsz: %v", err)
+		log.Errorf("Can't scrape subsz: %s", err)
 		return
 	}
 
 	e.up.Set(1)
 
 	e.startTime.Set(float64(varz.Start.Unix()))
-	e.mem.Set(varz.Mem)
-	e.connections.Set(varz.Connections)
-	e.routes.Set(varz.Routes)
-	e.remotes.Set(varz.Remotes)
-	e.slowConsumers.Set(varz.SlowConsumers)
-	e.totalConnections.Set(varz.TotalConnections)
-	e.inMsgs.Set(varz.InMsgs)
-	e.outMsgs.Set(varz.OutMsgs)
-	e.inBytes.Set(varz.InBytes)
-	e.outBytes.Set(varz.OutBytes)
+	e.mem.Set(float64(varz.Mem))
+	e.cpu.Set(varz.CPU)
+	e.connections.Set(float64(varz.Connections))
+	e.totalConnections.Set(float64(varz.TotalConnections))
+	e.routes.Set(float64(varz.Routes))
+	e.remotes.Set(float64(varz.Remotes))
+	e.inMsgs.Set(float64(varz.InMsgs))
+	e.outMsgs.Set(float64(varz.OutMsgs))
+	e.inBytes.Set(float64(varz.InBytes))
+	e.outBytes.Set(float64(varz.OutBytes))
+	e.slowConsumers.Set(float64(varz.SlowConsumers))
 	for path, requests := range varz.HTTPReqStats {
-		e.httpRequests.WithLabelValues(path).Set(requests)
+		e.httpRequests.WithLabelValues(path).Set(float64(requests))
 	}
-	e.numSubscriptions.Set(subsz.NumSubscriptions)
-	e.numCache.Set(subsz.NumCache)
-	e.numInserts.Set(subsz.NumInserts)
-	e.numRemoves.Set(subsz.NumRemoves)
-	e.numMatches.Set(subsz.NumMatches)
+
+	e.numSubscriptions.Set(float64(subsz.NumSubs))
+	e.numCache.Set(float64(subsz.NumCache))
+	e.numInserts.Set(float64(subsz.NumInserts))
+	e.numRemoves.Set(float64(subsz.NumRemoves))
+	e.numMatches.Set(float64(subsz.NumMatches))
 	e.cacheHitRate.Set(subsz.CacheHitRate)
-	e.maxFanout.Set(subsz.MaxFanout)
+	e.maxFanout.Set(float64(subsz.MaxFanout))
 	e.avgFanout.Set(subsz.AvgFanout)
 }
 
@@ -336,8 +350,8 @@ func main() {
 	var (
 		listenAddress = flag.String("web.listen-address", ":9148", "Address to listen on for web interface and telemetry.")
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-		natsScrapeURI = flag.String("nats.scrape-uri", "http://localhost:8222/", "Base URI on which to scrape gnatsd.")
-		natsTimeout   = flag.Duration("nats.timeout", 5*time.Second, "Timeout for trying to get stats from gnatsd.")
+		natsScrapeURI = flag.String("nats.scrape-uri", "http://localhost:8222/", "Base URI on which to scrape nats server.")
+		natsTimeout   = flag.Duration("nats.timeout", 5*time.Second, "Timeout for trying to get stats from nats server.")
 	)
 	flag.Parse()
 
@@ -349,7 +363,7 @@ func main() {
 	prometheus.MustRegister(exporter)
 
 	// Setup HTTP server
-	http.Handle(*metricsPath, prometheus.Handler())
+	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
              <head><title>NATS Exporter</title></head>
