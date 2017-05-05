@@ -14,8 +14,8 @@ go get github.com/markuslindenberg/nats_exporter
 ### Using Docker
 
 ```
-docker build -t nats_exporter .
-docker run --rm -p 9148:9148 nats_exporter -nats.scrape-uri http://gnatsd:8222/
+docker pull markuslindenberg/nats_exporter
+docker run --rm -p 9148:9148 markuslindenberg/nats_exporter -nats.scrape-uri http://gnatsd:8222/
 ```
 
 ## Running
